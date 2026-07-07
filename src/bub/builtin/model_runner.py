@@ -25,9 +25,11 @@ from any_llm.types.completion import (
 from loguru import logger
 from pydantic import TypeAdapter, ValidationError
 
+from bub.agent_hooks import LlmCallDecision, LlmCallRequest, LlmCallResult
 from bub.builtin.codex_provider import OpenaiCodexProvider, should_use_openai_codex_provider
 from bub.builtin.settings import AgentSettings, ModelCandidate
 from bub.builtin.tape import Tape
+from bub.hook_runtime import AgentHooks
 from bub.runtime import AsyncStreamEvents, BubError, ErrorKind, StreamEvent, StreamState
 from bub.tools import Tool, ToolContext, ToolExecutor
 
@@ -53,8 +55,9 @@ def _stream_usage_options(llm: AnyLLM, *, stream: bool) -> dict[str, Any] | None
 
 
 class ModelRunner:
-    def __init__(self, settings: AgentSettings) -> None:
+    def __init__(self, settings: AgentSettings, hooks: AgentHooks | None = None) -> None:
         self.settings = settings
+        self.hooks = hooks
 
     def iter_llm_clients(self, model: str) -> Iterator[tuple[ModelCandidate, AnyLLM]]:
         for candidate in self.settings.model_candidates(model):
@@ -76,7 +79,7 @@ class ModelRunner:
         return AnyLLM.create(candidate.provider, **client_kwargs)
 
     async def completion_response(
-        self, *, model: str, messages: list[dict[str, Any]], tools: list[Tool]
+        self, *, model: str, messages: list[dict[str, Any]], tools: list[Tool], max_tokens: int | None = None
     ) -> CompletionResult:
         from bub.builtin.tools import completion_tools
 
@@ -91,7 +94,7 @@ class ModelRunner:
                     model=candidate.model_id,
                     messages=completion_messages,
                     tools=tool_payloads,
-                    max_tokens=self.settings.max_tokens,
+                    max_tokens=max_tokens if max_tokens is not None else self.settings.max_tokens,
                     stream=streaming,
                     stream_options=_stream_usage_options(llm, stream=streaming),
                 )
@@ -127,10 +130,57 @@ class ModelRunner:
                 steering_messages=steering_messages,
             )
             output = ModelOutputAccumulator()
-            async with asyncio.timeout(self.settings.model_timeout_seconds):
-                completion = await self.completion_response(model=model, messages=messages, tools=tools)
-                async for event in self._completion_events(completion, state, output):
-                    yield event
+            request = LlmCallRequest(
+                run_id=run_id,
+                model=model,
+                messages=messages,
+                tool_names=tuple(tool_item.name for tool_item in tools),
+                max_tokens=self.settings.max_tokens,
+            )
+            decision: LlmCallDecision | None = None
+            if self.hooks is not None:
+                request, decision = await self.hooks.before_llm_call(request, state=tape.context.state)
+            if decision is not None:
+                await self.record_chat(
+                    tape=tape,
+                    run_id=run_id,
+                    system_prompt=system_prompt,
+                    new_messages=new_messages,
+                    response_text=decision.text,
+                    model=request.model,
+                )
+                yield StreamEvent("text", {"delta": decision.text})
+                yield StreamEvent("final", {"ok": True, "text": decision.text})
+                return
+            llm_started = datetime.now(UTC)
+            after_fired = False
+
+            async def fire_after(error: Exception | None = None) -> None:
+                """Fire after_llm_call once per completed call (success or Exception failure); cancellation/consumer close bypasses it."""
+
+                nonlocal after_fired
+                if after_fired:
+                    return
+                after_fired = True
+                await self._fire_after_llm_call(request, output, state, llm_started, tape, error=error)
+
+            try:
+                async with asyncio.timeout(self.settings.model_timeout_seconds):
+                    completion = await self.completion_response(
+                        model=request.model,
+                        messages=list(request.messages),
+                        tools=tools,
+                        max_tokens=request.max_tokens,
+                    )
+                    async for event in self._completion_events(completion, state, output):
+                        yield event
+            except Exception as exc:
+                # Cancellation / consumer close (BaseException) intentionally
+                # bypasses after_llm_call: only real completions and failures
+                # are terminal observations.
+                await fire_after(exc)
+                raise
+            await fire_after()
 
             tool_calls = output.tool_calls
             if tool_calls:
@@ -139,7 +189,7 @@ class ModelRunner:
                 tool_invocations = [tool_invocation_from_native(tool_call, tool_map) for tool_call in tool_calls]
                 yield StreamEvent("tool_call", {"tool_calls": serialized_tool_calls})
                 context = ToolContext(tape=tape, run_id=run_id, state=tape.context.state)
-                execution = await ToolExecutor().execute_async(
+                execution = await ToolExecutor(hooks=self.hooks).execute_async(
                     tool_invocations,
                     context=context,
                 )
@@ -152,7 +202,7 @@ class ModelRunner:
                     tool_calls=serialized_tool_calls,
                     tool_results=execution.tool_results,
                     response=output.response,
-                    model=model,
+                    model=request.model,
                     usage=state.usage,
                 )
                 yield StreamEvent("tool_result", {"tool_results": execution.tool_results})
@@ -169,7 +219,7 @@ class ModelRunner:
                 new_messages=new_messages,
                 response_text=text,
                 response=output.response,
-                model=model,
+                model=request.model,
                 usage=state.usage,
             )
             yield StreamEvent("final", {"ok": True, "text": text})
@@ -179,6 +229,28 @@ class ModelRunner:
     @staticmethod
     def generate_run_id() -> str:
         return f"run-{datetime.now(UTC).strftime('%Y%m%dT%H%M%S%fZ')}"
+
+    async def _fire_after_llm_call(
+        self,
+        request: LlmCallRequest,
+        output: ModelOutputAccumulator,
+        state: StreamState,
+        started: datetime,
+        tape: Tape,
+        error: Exception | None = None,
+    ) -> None:
+        if self.hooks is None:
+            return
+        duration_ms = int((datetime.now(UTC) - started).total_seconds() * 1000)
+        result = LlmCallResult(
+            run_id=request.run_id,
+            text=output.text or None,
+            tool_calls=[call.model_dump(exclude_none=True) for call in output.tool_calls],
+            usage=state.usage,
+            error=error,
+            duration_ms=duration_ms,
+        )
+        await self.hooks.after_llm_call(request, result, state=tape.context.state)
 
     async def build_messages(
         self,
