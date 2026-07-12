@@ -96,6 +96,7 @@ COPY --link --from=node-assets /empty/ /
 FROM mise AS final
 USER root:root
 RUN install_packages \
+    bubblewrap \
     build-essential musl \
     ca-certificates curl \
     fd-find \
