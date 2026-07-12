@@ -12,6 +12,11 @@ services:
       - ${BUB_WORKSPACE_PATH:-.}:/workspace
       - ${BUB_HOME_HOST:-${HOME}/.bub}:/data
       - ${BUB_AGENT_HOME:-${HOME}/.agents}:/home/nonroot/.agents
+      - "${HOME}/.codex/:/home/nonroot/.codex/"
+      - "${HOME}/.config/opencode/:/home/nonroot/.config/opencode/"
+      - "${HOME}/.local/share/opencode/:/home/nonroot/.local/share/opencode/"
+      - "${HOME}/.local/state/opencode/:/home/nonroot/.local/state/opencode/"
+      - "${HOME}/.opencode/:/home/nonroot/.opencode/"
     stdin_open: true
     tty: true
     restart: unless-stopped
