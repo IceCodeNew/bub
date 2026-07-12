@@ -11,7 +11,7 @@ services:
     volumes:
       - ${BUB_WORKSPACE_PATH:-.}:/workspace
       - ${BUB_HOME_HOST:-${HOME}/.bub}:/data
-      - ${BUB_AGENT_HOME:-${HOME}/.agents}:/root/.agents
+      - ${BUB_AGENT_HOME:-${HOME}/.agents}:/home/nonroot/.agents
     stdin_open: true
     tty: true
     restart: unless-stopped
