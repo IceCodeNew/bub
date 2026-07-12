@@ -17,6 +17,7 @@ services:
       - "${HOME}/.local/share/opencode/:/home/nonroot/.local/share/opencode/"
       - "${HOME}/.local/state/opencode/:/home/nonroot/.local/state/opencode/"
       - "${HOME}/.opencode/:/home/nonroot/.opencode/"
+      - ${BUB_HOME_HOST:-${HOME}/.bub}/wechat_token.json:/home/nonroot/.bub/wechat_token.json
     stdin_open: true
     tty: true
     restart: unless-stopped
