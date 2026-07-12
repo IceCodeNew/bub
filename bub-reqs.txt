@@ -1,0 +1,13 @@
+bub-feishu
+
+bub-schedule
+
+bub-web-search
+
+git+https://github.com/bubbuild/bub-contrib.git#subdirectory=packages/bub-codex
+
+git+https://github.com/bubbuild/bub-contrib.git#subdirectory=packages/bub-session-prompt
+
+git+https://github.com/bubbuild/bub-contrib.git#subdirectory=packages/bub-tapestore-sqlalchemy
+
+git+https://github.com/bubbuild/bub-contrib.git#subdirectory=packages/bub-wechat
